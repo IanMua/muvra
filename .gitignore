@@ -1,0 +1,17 @@
+# 本地交接和实验资料保留归档，不能进入公开仓库。
+.local-archive/
+reports/
+browsers/
+browsers-cli/
+output/
+.playwright-cli/
+node_modules/
+dist/
+*.tgz
+# 示例构建产物由源码重新生成。
+demo/*.js
+demo/*.js.map
+demo/chunks/
+test-results/
+playwright-report/
+.DS_Store

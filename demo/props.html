@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>Real Vue Props Inference</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font:
+          16px/1.5 system-ui,
+          sans-serif;
+        color: #183146;
+        background: #eef2f6;
+      }
+      main {
+        max-width: 900px;
+        margin: auto;
+        padding: 20px;
+      }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+      button {
+        font: inherit;
+        padding: 8px 12px;
+        border: 1px solid #9aafbf;
+        border-radius: 6px;
+        background: white;
+      }
+      .inference-frame {
+        height: 420px;
+        border: 1px solid #c6d2db;
+        border-radius: 8px;
+        overflow: hidden;
+        background: white;
+      }
+      .page {
+        min-height: 100%;
+        padding: 20px;
+        background: white;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/demo/props.js"></script>
+  </body>
+</html>

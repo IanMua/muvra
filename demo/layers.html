@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>Muvra · 图层与扩展</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #eff3f8;
+        color: #142b45;
+        font:
+          15px/1.6 system-ui,
+          sans-serif;
+      }
+      button,
+      input {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+        border: 1px solid #c2cedc;
+        border-radius: 9px;
+        background: white;
+        padding: 7px 12px;
+        color: #17314f;
+      }
+      button:hover {
+        background: #e7eff8;
+      }
+      .layer-lab {
+        max-width: 1160px;
+        margin: 0 auto;
+        padding: 32px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      h1 {
+        font-size: 34px;
+        line-height: 1.3;
+        margin: 8px 0 22px;
+      }
+      h2 {
+        margin: 8px 0 16px;
+      }
+      h3 {
+        margin: 12px 0 0;
+      }
+      .layer-eyebrow {
+        font-size: 11px;
+        letter-spacing: 0.15em;
+        font-weight: 700;
+        color: #4b88ad;
+      }
+      a {
+        color: #267798;
+      }
+      .layer-columns {
+        display: grid;
+        grid-template-columns: 1.25fr 1fr;
+        gap: 30px;
+      }
+      .layer-frame {
+        position: relative;
+        height: 410px;
+        border: 1px solid #c1cbd8;
+        border-radius: 22px;
+        overflow: hidden;
+        background: white;
+        box-shadow: 0 16px 35px #243c5a0c;
+      }
+      .layer-home,
+      .layer-order {
+        height: 100%;
+        padding: 40px 32px;
+        background: linear-gradient(145deg, #eefaff, #c4e5f5);
+      }
+      .layer-order {
+        background: linear-gradient(145deg, #ffe9c8, #f9d8df);
+      }
+      .layer-card {
+        position: absolute;
+        inset: 22% 6% 5%;
+        padding: 24px;
+        background: #fff;
+        box-shadow: 0 8px 25px #122c4130;
+        border-radius: 18px;
+      }
+      .layer-card p {
+        font-size: 13px;
+        color: #5f7489;
+      }
+      .layer-card label {
+        font-size: 13px;
+      }
+      input:not([type="range"]) {
+        width: 100%;
+        padding: 7px;
+        border: 1px solid #b5c6d8;
+        border-radius: 6px;
+        background: #ffffffc9;
+      }
+      .layer-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 16px;
+      }
+      .layer-card .layer-actions {
+        margin-top: 12px;
+      }
+      .layer-card button {
+        font-size: 12px;
+        padding: 5px 7px;
+      }
+      .layer-card output {
+        font-size: 11px;
+        color: #7192aa;
+      }
+      .standalone-frame {
+        height: 260px;
+      }
+      .standalone-base {
+        height: 100%;
+        padding: 24px;
+        background: repeating-linear-gradient(
+          45deg,
+          #b9dbea,
+          #b9dbea 18px,
+          #d3e8ee 18px,
+          #d3e8ee 36px
+        );
+      }
+      .standalone-card {
+        position: absolute;
+        inset: 25% 15%;
+        display: grid;
+        place-items: center;
+        background: #fff;
+        border-radius: 18px;
+        box-shadow: 0 10px 28px #102d4b30;
+      }
+      .layer-slider {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin-top: 25px;
+      }
+      footer {
+        margin-top: 24px;
+        display: grid;
+        grid-template-columns: 1fr 2fr;
+        gap: 20px;
+      }
+      pre {
+        font-size: 11px;
+        background: #e4eaf2;
+        padding: 12px;
+        border-radius: 9px;
+        white-space: pre-wrap;
+        max-height: 130px;
+        overflow: auto;
+      }
+      @media (max-width: 700px) {
+        .layer-lab {
+          padding: 18px;
+        }
+        .layer-columns {
+          grid-template-columns: 1fr;
+        }
+        .layer-frame {
+          height: 410px;
+        }
+        .standalone-frame {
+          height: 200px;
+        }
+        header {
+          display: block;
+        }
+        h1 {
+          font-size: 28px;
+        }
+        footer {
+          grid-template-columns: 1fr;
+        }
+        .layer-card {
+          padding: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./layers.js"></script>
+  </body>
+</html>

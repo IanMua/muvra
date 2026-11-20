@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Muvra · 溶解与光效</title>
+    <link rel="icon" href="data:," />
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 20px;
+        background: #071018;
+        color: #e2e8f0;
+        font:
+          14px/1.6 system-ui,
+          sans-serif;
+      }
+      .animation-lab {
+        max-width: 760px;
+        margin: auto;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 16px;
+      }
+      header span {
+        color: #67e8f9;
+      }
+      .effect-frame {
+        position: relative;
+        height: min(570px, 60vh);
+        min-height: 330px;
+        overflow: hidden;
+        border-radius: 22px;
+        border: 1px solid #334155;
+      }
+      .scene {
+        width: 100%;
+        min-height: 100%;
+        padding: 32px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        text-align: center;
+      }
+      .scene-home {
+        background: #0f172a;
+      }
+      .scene-dissolve {
+        background: #087f68;
+      }
+      .scene-glow {
+        background: #33235c;
+      }
+      .scene small {
+        letter-spacing: 0.18em;
+        opacity: 0.7;
+      }
+      .scene h1 {
+        margin: 0;
+        font-size: 30px;
+      }
+      .scene p {
+        margin: 0;
+      }
+      .scene-orbit {
+        width: 120px;
+        height: 120px;
+        border: 1px solid #ffffff55;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        font-size: 54px;
+        background: #ffffff0d;
+      }
+      input {
+        max-width: 100%;
+        width: 280px;
+        padding: 12px;
+        border: 1px solid #ffffff55;
+        border-radius: 10px;
+        color: white;
+        background: #0003;
+      }
+      input::placeholder {
+        color: #ffffffaa;
+      }
+      nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 16px 0;
+      }
+      button {
+        background: #163147;
+        color: #e0f2fe;
+        border: 1px solid #3c5970;
+        border-radius: 9px;
+        padding: 8px 12px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #20465f;
+      }
+      .scene-popup {
+        background: #0008;
+      }
+      .popup-card {
+        background: #1e293b;
+        border: 1px solid #7dd3fc;
+        border-radius: 20px;
+        padding: 32px;
+      }
+      .vue-glow-layer {
+        position: absolute;
+        inset: -25%;
+        background: conic-gradient(
+          from 40deg,
+          transparent 0deg,
+          #a5f3fc88 60deg,
+          transparent 110deg,
+          #d8b4fe88 210deg,
+          transparent 270deg
+        );
+        mix-blend-mode: screen;
+        display: grid;
+        place-content: center;
+      }
+      .vue-glow-layer span {
+        opacity: 0.12;
+        font-size: 10px;
+      }
+      output {
+        display: block;
+        color: #67e8f9;
+        word-break: break-word;
+      }
+      .effect-counters,
+      .view-detached {
+        color: #94a3b8;
+      }
+      @media (max-width: 480px) {
+        body {
+          padding: 12px;
+        }
+        .scene {
+          padding: 20px;
+        }
+        .scene h1 {
+          font-size: 26px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/demo/effects.js"></script>
+  </body>
+</html>

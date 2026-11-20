@@ -1,0 +1,26 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "rootDir": "../..",
+    "skipLibCheck": false,
+    "types": [],
+    "noUnusedLocals": false
+  },
+  "include": [
+    "./pages/**/*.vue",
+    "./InferenceHost.vue",
+    "./catalog.ts",
+    "./runtime.ts",
+    "./positive.ts",
+    "./animation/**/*.vue",
+    "./animation/**/*.ts",
+    "../../demo/props.ts",
+    "../../demo/effects.ts",
+    "./layers/**/*.vue",
+    "./layers/**/*.ts",
+    "../../demo/layers.ts"
+  ]
+}
