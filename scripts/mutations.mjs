@@ -10,6 +10,18 @@ await mkdir(destination, { recursive: true });
 // 在独立拷贝中故意破坏契约；编译失败不计为检出，只有可执行变体被断言击中才算有效。
 const operators = [
   [
+    "interception-info-retention",
+    "engine.ts",
+    "id: job.id,\n      info: job.info,\n      intent,",
+    "id: job.id,\n      info: undefined,\n      intent,",
+  ],
+  [
+    "resume-binding-identity",
+    "engine.ts",
+    "records.get(binding.pageId)?.interception === binding.interception,",
+    "Boolean(records.get(binding.pageId)?.interception),",
+  ],
+  [
     "backdrop-foreground",
     "extensions/backdrop.ts",
     "const foreground = visible.at(-1);",

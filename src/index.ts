@@ -12,6 +12,9 @@ export type { ErrorCode } from "./errors.js";
 export type { ComponentInputs, LazyPageComponent, PageDefiner } from "./component-inputs.js";
 export type {
   CatalogEntry,
+  BeforeNavigate,
+  BeforeNavigateContext,
+  BeforeNavigateResult,
   Diagnostic,
   DynamicArguments,
   GuardContext,
@@ -21,6 +24,9 @@ export type {
   NativeBackDecision,
   NavigationGuard,
   NavigationOptions,
+  NavigationRequest,
+  NavigationEvent,
+  NavigationListener,
   NavigationResult,
   ObservableLike,
   Operation,

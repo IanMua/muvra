@@ -141,6 +141,47 @@ if (result.status === "completed" && result.transition === "timed-out") recordSl
 - 同一轮同时提交的命令及动画期间提交的命令按 FIFO 排队，队列有容量上限。
 - 命令接受 `AbortSignal`，排队任务可独立中止；`stack.cancel()` 中止当前任务。检查超时会通知其 signal；转场超时会中止驱动并完成最终同步。
 
+## 导航附加信息与全局扩展点
+
+页面输入使用 `params`，页面静态声明使用 `meta`；每次导航的业务附加信息使用 `info`。`info` 类型为 unknown，字段和校验由业务决定；框架按引用传递，不序列化、不深拷贝、不深冻结，也不将它写入页面 props、页面身份、缓存 key 或历史条目。入队时固定该引用，业务自行管理对象内部的修改。
+
+```ts
+// 业务先解析外部输入；导航层只接收已确定的页面目标和附加信息。
+await stack.push({ name: "orderDetail", params: { orderNo: "123" } }, { info: businessInfo });
+```
+
+`beforeNavigate` 在每次实际执行时按注册顺序运行一次，早于所有页面守卫。reset 的多个目标和同次执行内的重定向不会重复执行前置处理；resume 是新执行，会再次处理。支持同步、PromiseLike 和 ObservableLike 首值，复用 guardTimeoutMs、中止及清理规则。返回 void/true 放行，false 取消，`{ info }` 整份替换附加信息；重定向仍通过页面守卫返回路由。不能在处理函数中等待自己发起的嵌套导航。
+
+```ts
+const removePreparation = stack.beforeNavigate(async (navigation) => {
+  // 业务自行判断是否需要准备，并通过返回值显式替换 info。
+  if (!isBusinessInfo(navigation.info)) return;
+  return { info: await prepareBusiness(navigation.info, navigation.signal) };
+});
+
+stack.beforeEach(({ to, info }) => {
+  // 全局、页面进入、离开和返回守卫均可读取本次执行的有效 info。
+  return checkBusinessAccess(to, info);
+});
+
+const stopObserving = stack.onNavigation((event) => {
+  // requested 是请求产生，settled 是唯一结果；埋点的字段和成功口径由业务决定。
+  recordBusinessEvent(event);
+});
+```
+
+注册函数返回撤销函数。也可通过 createPageStack 的 `beforeNavigate`、`onNavigation` 配置在初始化之前安装。需要为首次导航提供 info 时，可以不配置 initial，注册扩展点后使用 `reset(initialRoutes, { info })`；空 ready 不产生导航事件。
+
+NavigationRequest 提供 id、operation、reason、info、resumedFromId 和可选的 route/routes/delta。目标尚未经过页面校验，观察者不能据此假设输入有效；目标描述保持原请求，不随重定向改写。BeforeNavigateContext 额外提供执行开始时的 from 和本次 signal。最终页面从 settled.result.state 读取，不能把跳到承接页算成原目标已展示。
+
+每个存活实例收到的导航请求产生一次 requested 和一次 settled，事件外壳只读。requested.info 是调用时的值，settled.info/result.info 是前置处理后的有效值。busy、非法输入、排队取消、无操作和失败均有终态；未执行的请求不运行前置处理。事件按发生顺序同步通知，但不等待观察者返回的 Promise；同步异常及异步拒绝按原导航 ID 报告 SUBSCRIBER_ERROR，不改变导航结果。
+
+销毁时活动及排队请求先各自产生 disposed 终态，再释放订阅；销毁后的调用仅返回 disposed 结果，不再广播。观察者返回值没有控制语义；info 中的业务对象仍按引用提供，业务不得依赖修改观察事件来控制导航。
+
+普通调用省略 info 时为空，不继承上一导航。恢复调用省略 info 时继承原拦截保存的有效值；显式 `resume({ info: next })` 整份替换，`resume({ info: undefined })` 清空，均不自动合并。恢复使用新的执行 ID，resumedFromId 指向被恢复的那次执行；原信号不复用，守卫重新执行。取消或失败且未提交时保留原拦截；成功提交后消费旧拦截，即使承接页被缓存也解除引用。恢复在调用时绑定拦截及页面作用域，排队期间失效则返回 not-intercepted，不恢复另一份请求。
+
+页面曝光可根据已有的可见性、焦点及状态订阅定义；导航结果不等于业务数据加载成功。业务 URL 解析、分享记录、外部事件投递与重试策略仍由宿主负责。
+
 ## 登录拦截恢复
 
 ```ts

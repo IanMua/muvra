@@ -656,3 +656,44 @@ test("零动画下连续排队往返不会复用已卸载的页面上下文", as
   view.unmount();
   stack.dispose();
 });
+
+test("页面上下文恢复保留导航 info，旧组件作用域不能恢复重挂后的拦截", async () => {
+  const contexts = [];
+  const observed = [];
+  let allowed = false;
+  const login = defineComponent({
+    setup() {
+      contexts.push(usePage());
+      return () => h("p", "login");
+    },
+  });
+  const { stack } = await create(
+    { home: tab(blank), target: page(blank), login: page(login) },
+    {
+      onNavigation: (event) => observed.push(event),
+    },
+  );
+  stack.beforeEach(({ to }) => {
+    if (to.name === "target" && !allowed) return { name: "login" };
+  });
+  let view = mountView(stack);
+  const info = { arbitrary: "business" };
+  const intercepted = await stack.push({ name: "target" }, { info });
+  await flush();
+  const old = contexts.at(-1);
+  view.unmount();
+  view = mountView(stack);
+  await flush();
+  assert.equal((await old.resume()).reason, "not-intercepted");
+  allowed = true;
+  const resumed = await contexts.at(-1).resume();
+  assert.equal(resumed.info, info);
+  assert.equal(resumed.resumedFromId, intercepted.id);
+  const terminal = observed.filter(
+    (event) => event.type === "settled" && event.operation === "resume",
+  );
+  assert.equal(terminal.length, 2);
+  assert.equal(terminal[1].info, info);
+  view.unmount();
+  stack.dispose();
+});

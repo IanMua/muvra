@@ -82,3 +82,11 @@
 ## 实验包到 Muvra alpha
 
 所有包导入统一使用 `muvra`，可选遮罩使用 `muvra/extensions/backdrop`。版本重新起步为 `0.1.0-alpha.0`，采用 MIT；这不代表与其他同版本号软件兼容。手动示例服务端口变量改为 `MUVRA_PORT`。业务基线和保护脚本不再属于独立项目的验收流程，旧报告只保留在本地归档。
+
+## 导航级 info 和生命周期扩展
+
+本次新增可选的 NavigationOptions.info，GuardContext 和 NavigationResult 提供只读 info、resumedFromId。已有导航调用保持兼容；手动构造这些框架结果类型时需补齐新增字段，正常调用方无需构造结果。没有业务附加信息时值为 undefined。
+
+beforeEach 继续逐目标检查；beforeNavigate 每次实际执行运行一次，可以异步准备并显式替换 info。onNavigation 观察 requested/settled，返回值不参与导航决策。需要统计时优先使用统一事件；不要根据 subscribe 的通知次数统计导航。字段结构、埋点口径和平台入口适配由业务决定。
+
+恢复仍使用 resume，但在调用时绑定具体拦截；排队期间被替换的拦截返回 not-intercepted。成功消费后缓存承接页不再持有旧拦截；失败重试默认沿用原 info。

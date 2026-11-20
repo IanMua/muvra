@@ -167,19 +167,8 @@ export function usePage(stack?: PageStack<any>, name?: string): PageContext<unkn
       void state.value;
       return scopeAlive.value && Boolean(controller.record(id)?.interception);
     }),
-    resume: (options) => {
-      if (!scopeAlive.value || injection.stack.getSnapshot().top?.id !== id)
-        return Promise.resolve(
-          Object.freeze({
-            id: 0,
-            operation: "resume",
-            status: "noop",
-            reason: "not-intercepted",
-            state: injection.stack.getSnapshot(),
-          }),
-        );
-      return injection.stack.resume(options);
-    },
+    // 同时绑定页面身份和本次组件作用域，排队期间重挂后旧上下文不能恢复新拦截。
+    resume: (options) => controller.resume(id, options, lifetime.signal),
     onShow: (callback) => lifecycle("show", callback),
     onHide: (callback) => lifecycle("hide", callback),
     onUnload: (callback) => lifecycle("unload", callback),

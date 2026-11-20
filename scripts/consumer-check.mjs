@@ -54,6 +54,13 @@ await stack.ready;await stack.push({name:'order',params:{id:'42'}});assert.equal
 await stack.openPopup({name:'dialog'});assert.equal(api.handleNativeBack(stack),'handled');
 await new Promise(r=>setTimeout(r,0));assert.equal(stack.getSnapshot().popups.length,0);
 await assert.rejects(import('muvra/dist/internal.js'),e=>e.code==='ERR_PACKAGE_PATH_NOT_EXPORTED');
+const events=[];
+const stop=stack.onNavigation(event=>events.push(event));
+const info={custom:'consumer'};
+const remove=stack.beforeNavigate(({info:input})=>({info:input ?? info}));
+const custom=await stack.push({name:'order',params:{id:'info'}},{info});
+assert.equal(custom.info,info);assert.equal(events.length,2);assert.equal(events[1].result,custom);
+remove();stop();
 stack.dispose();console.log(JSON.stringify({node:process.version,status:'consumer-smoke-passed'}));
 `;
 const declarations = `import {h} from 'vue';
@@ -67,6 +74,10 @@ const context=()=>usePage(stack,'order').params.value.id;
 const route=stack.getSnapshot().current;if(isPage(stack,route,'order')){const id:string=route.params.id;void id;}
 for(const item of stack.catalog){if(item.kind==='tab')stack.switchTab({name:item.name});}
 handleNativeBack(stack);
+stack.beforeNavigate(({info,signal})=>{const custom:unknown=info;void signal;return {info:custom};});
+stack.onNavigation(event=>{if(event.type==='settled'){const info:unknown=event.result.info;void info;}});
+stack.push({name:'order',params:{id:'typed'}},{info:{business:true}});
+stack.resume({info:undefined});
 // @ts-expect-error 发布声明保留必填参数约束。
 stack.push({name:'order'});
 // @ts-expect-error 发布声明保留页面种类约束。

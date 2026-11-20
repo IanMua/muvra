@@ -5,6 +5,8 @@ import type {
   Operation,
   LeaveGuard,
   Diagnostic,
+  NavigationOptions,
+  NavigationResult,
 } from "./types.js";
 
 export type HookKind = "show" | "hide" | "unload";
@@ -19,6 +21,9 @@ export interface Intent {
   delta?: number;
 }
 export interface Interception {
+  /** 拦截以对象身份绑定，执行编号用于关联恢复；不复用原执行的中止信号。 */
+  id: number;
+  info: unknown;
   intent: Intent;
   history: readonly ResolvedRoute[];
   popups: readonly ResolvedRoute[];
@@ -44,6 +49,11 @@ export interface RenderRequest {
   signal: AbortSignal;
 }
 export interface InternalController {
+  resume(
+    id: number,
+    options?: NavigationOptions,
+    scopeSignal?: AbortSignal,
+  ): Promise<NavigationResult>;
   reserveView(): () => void;
   record(id: number): InternalPage | undefined;
   hook(id: number, kind: HookKind, callback: () => void): { activate(): void; remove(): void };

@@ -4,10 +4,13 @@ import { createPlanner } from "./planner.js";
 import { createRecordStore } from "./record-store.js";
 import type { Plan } from "./planner.js";
 import { notify } from "./notifications.js";
+import { createNavigationLifecycle } from "./navigation-lifecycle.js";
 import { Interrupted, PageStackError } from "./errors.js";
 import { bindController } from "./internal.js";
 import type { HookKind, InternalPage, Intent, Interception, RenderRequest } from "./internal.js";
 import type {
+  BeforeNavigateContext,
+  BeforeNavigateResult,
   CatalogEntry,
   Diagnostic,
   DynamicArguments,
@@ -17,6 +20,7 @@ import type {
   NavigationGuard,
   NavigationOptions,
   NavigationResult,
+  NavigationRequest,
   PageCatalog,
   PageDefinition,
   PageStack,
@@ -27,9 +31,22 @@ import type {
   TransitionOutcome,
 } from "./types.js";
 
-interface Job {
+interface ResumeBinding {
+  pageId: number;
+  interception: Interception;
+  scopeSignal: AbortSignal | undefined;
+}
+interface RequestState {
   id: number;
   intent: Intent;
+  info: unknown;
+  reason: NonNullable<NavigationOptions["reason"]>;
+  resumedFromId: number | undefined;
+  binding: ResumeBinding | undefined;
+  requested: boolean;
+  settled: NavigationResult | undefined;
+}
+interface Job extends RequestState {
   options: NavigationOptions;
   abort: AbortController;
   resolve(result: NavigationResult): void;
@@ -61,13 +78,15 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
     "maxQueue",
     "maxPopups",
     "beforeEach",
+    "beforeNavigate",
+    "onNavigation",
     "onError",
   ]);
   for (const [name, value] of Object.entries(input)) {
     if (!accepted.has(name) || value === null)
       throw new PageStackError("INVALID_CONFIG", `Unknown or null stack option "${name}".`);
   }
-  for (const name of ["beforeEach", "onError"] as const) {
+  for (const name of ["beforeEach", "beforeNavigate", "onNavigation", "onError"] as const) {
     if (input[name] !== undefined && typeof input[name] !== "function")
       throw new PageStackError("INVALID_CONFIG", `${name} must be a function.`);
   }
@@ -137,6 +156,9 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
   if (input.onError) diagnostics.add(input.onError);
   const guards = new Set<RuntimeGuard>();
   if (input.beforeEach) guards.add(input.beforeEach);
+  const lifecycle = createNavigationLifecycle(report);
+  if (input.beforeNavigate) lifecycle.beforeNavigate(input.beforeNavigate);
+  if (input.onNavigation) lifecycle.onNavigation(input.onNavigation);
   const queue: Job[] = [];
   let routeSeed = 0;
   let navigationSeed = 0;
@@ -318,17 +340,18 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
     });
   }
   const plan = createPlanner(options, normalize);
-  async function callGuard(
-    guard: RuntimeGuard | import("./types.js").LeaveGuard,
-    context: GuardContext,
+  /** 前置处理与页面守卫共享首值、超时、中止和迟到拒绝处理，避免产生第二套异步规则。 */
+  async function callCheck<T>(
+    callback: () => GuardReturn<T>,
     job: Job,
-  ): Promise<GuardDecision> {
+    from: ResolvedRoute | undefined,
+  ): Promise<T | undefined> {
     try {
-      return await settle(
+      return await settle<T | undefined>(
         () => {
           invokingGuard = true;
           try {
-            return guard(context);
+            return callback();
           } finally {
             invokingGuard = false;
           }
@@ -340,9 +363,9 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
           empty: undefined,
           onCleanupError: (cause) =>
             report({
-              error: error("GUARD_ERROR", "Guard subscription cleanup failed.", cause),
+              error: error("GUARD_ERROR", "Navigation check cleanup failed.", cause),
               navigationId: job.id,
-              route: context.from,
+              route: from,
               severity: "error",
             }),
         },
@@ -351,8 +374,68 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
       if (cause instanceof Interrupted) throw cause;
       if (cause instanceof PageStackError && cause.code === "GUARD_TIMEOUT")
         job.abort.abort("timeout");
-      throw error("GUARD_ERROR", "Navigation guard failed.", cause);
+      throw error("GUARD_ERROR", "Navigation check failed.", cause);
     }
+  }
+  function callGuard(
+    guard: RuntimeGuard | import("./types.js").LeaveGuard,
+    context: GuardContext,
+    job: Job,
+  ): Promise<GuardDecision> {
+    return callCheck(() => guard(context), job, context.from);
+  }
+  function validResume(job: RequestState): boolean {
+    const binding = job.binding;
+    return Boolean(
+      binding &&
+      !binding.scopeSignal?.aborted &&
+      snapshot.top?.id === binding.pageId &&
+      records.get(binding.pageId)?.interception === binding.interception,
+    );
+  }
+  function requestOf(job: RequestState): NavigationRequest {
+    const intent = job.binding?.interception.intent ?? job.intent;
+    return Object.freeze({
+      ...intent,
+      operation: job.intent.operation,
+      id: job.id,
+      reason: job.reason,
+      info: job.info,
+      resumedFromId: job.resumedFromId,
+    });
+  }
+  function requested(job: RequestState): void {
+    if (job.requested || job.id === 0) return;
+    job.requested = true;
+    lifecycle.requested(requestOf(job));
+  }
+  async function preprocess(job: Job): Promise<boolean> {
+    for (const handler of lifecycle.handlers()) {
+      const navigation: BeforeNavigateContext = Object.freeze({
+        ...requestOf(job),
+        from: snapshot.top,
+        signal: job.abort.signal,
+      });
+      const value: BeforeNavigateResult = await callCheck(
+        () => handler(navigation),
+        job,
+        navigation.from,
+      );
+      if (value === false) return false;
+      if (value === undefined || value === true) continue;
+      if (
+        !value ||
+        typeof value !== "object" ||
+        !Object.hasOwn(value, "info") ||
+        Object.keys(value).some((key) => key !== "info")
+      )
+        throw new PageStackError(
+          "GUARD_ERROR",
+          "Preprocessor must return void, boolean, or { info }.",
+        );
+      job.info = value.info;
+    }
+    return true;
   }
   function decision(value: GuardDecision): "allow" | "cancel" | RouteInput {
     if (value === undefined || value === true) return "allow";
@@ -380,9 +463,8 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
     let basePopups: readonly ResolvedRoute[] = popups;
     let interception: Interception | undefined;
     if (intent.operation === "resume") {
-      const top = popups.at(-1) ?? history.at(-1);
-      interception = top ? records.get(top.id)?.interception : undefined;
-      if (!interception)
+      interception = job.binding?.interception;
+      if (!validResume(job) || !interception)
         return {
           ...plan({ operation: "back" }, [], [], false),
           noop: "not-intercepted",
@@ -392,6 +474,8 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
       basePopups = interception.popups;
     }
     const origin: Interception = {
+      id: job.id,
+      info: job.info,
       intent,
       history: [...baseHistory],
       popups: [...basePopups],
@@ -420,10 +504,12 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
           : 0;
         const context: GuardContext = Object.freeze({
           operation: job.intent.operation,
+          info: job.info,
+          resumedFromId: job.resumedFromId,
           from: snapshot.top,
           to: target,
           signal: job.abort.signal,
-          reason: job.options.reason ?? "program",
+          reason: job.reason,
           delta,
         });
         const chain = [...guards];
@@ -469,10 +555,12 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
               guard,
               Object.freeze({
                 operation: job.intent.operation,
+                info: job.info,
+                resumedFromId: job.resumedFromId,
                 from: route,
                 to: next.to,
                 signal: job.abort.signal,
-                reason: job.options.reason ?? "program",
+                reason: job.reason,
                 delta,
               }),
               job,
@@ -548,9 +636,14 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
     }
   }
   async function execute(job: Job): Promise<Outcome> {
+    if (job.intent.operation === "resume" && !validResume(job))
+      return { status: "noop", reason: "not-intercepted" };
+    if (!(await preprocess(job))) return { status: "cancelled", reason: "guard" };
     const next = await prepare(job);
     if (next === "cancel") return { status: "cancelled", reason: "guard" };
     if (next.noop) return { status: "noop", reason: next.noop };
+    if (job.intent.operation === "resume" && !validResume(job))
+      return { status: "noop", reason: "not-intercepted" };
     if (job.abort.signal.aborted) throw new Interrupted(disposed ? "disposed" : "aborted");
     const previousTop = popups.at(-1) ?? history.at(-1);
     history = next.history;
@@ -559,6 +652,11 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
     store.ensure(layers);
     if (next.to && next.interception) records.get(next.to.id)!.interception = next.interception;
     else if (next.to) records.get(next.to.id)!.interception = undefined;
+    // 成功提交后消费旧拦截；缓存的承接页也不能继续持有已恢复的业务信息。
+    if (job.binding) {
+      const owner = records.get(job.binding.pageId);
+      if (owner?.interception === job.binding.interception) owner.interception = undefined;
+    }
     const from = next.from ?? previousTop;
     transitionVisible.clear();
     if (from) transitionVisible.add(from.id);
@@ -587,21 +685,41 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
     publish();
     return { status: "completed", transition, redirected: next.redirected };
   }
-  function result(job: Pick<Job, "id" | "intent">, outcome: Outcome): NavigationResult {
+  function result(job: RequestState, outcome: Outcome): NavigationResult {
+    if (job.settled) return job.settled;
+    if (disposed) outcome = { status: "cancelled", reason: "disposed" };
+    const completed = Object.freeze({
+      ...outcome,
+      id: job.id,
+      operation: job.intent.operation,
+      info: job.info,
+      resumedFromId: job.resumedFromId,
+      state: snapshot,
+    });
+    // 先固定唯一结果，再调用外部观察者；同步销毁或取消不能重复发布终态。
+    job.settled = completed;
+    requested(job);
+    if (job.id !== 0) lifecycle.settled(requestOf(job), completed);
     if (!disposed && outcome.status === "failed")
       report({
         error: outcome.error,
         navigationId: job.id,
-        route: snapshot.top,
+        route: completed.state.top,
         severity: "error",
       });
-    if (disposed) outcome = { status: "cancelled", reason: "disposed" };
-    return Object.freeze({
-      ...outcome,
-      id: job.id,
-      operation: job.intent.operation,
-      state: snapshot,
-    });
+    return completed;
+  }
+  function requestState(id: number, intent: Intent): RequestState {
+    return {
+      id,
+      intent,
+      info: undefined,
+      reason: "program",
+      resumedFromId: undefined,
+      binding: undefined,
+      requested: false,
+      settled: undefined,
+    };
   }
   function collectDefinitions(): void {
     const referenced = new Set<string>();
@@ -667,9 +785,10 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
   function enqueue(
     intent: Intent,
     navigationOptions: NavigationOptions = {},
+    constraints: { pageId?: number; scopeSignal?: AbortSignal; failure?: PageStackError } = {},
   ): Promise<NavigationResult> {
     const id = ++navigationSeed;
-    const stub = { id, intent };
+    const stub = requestState(id, intent);
     if (disposed) return Promise.resolve(result(stub, { status: "cancelled", reason: "disposed" }));
     let captured: Intent;
     try {
@@ -677,6 +796,22 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         throw new TypeError("Navigation options must be an object.");
       navigationOptions = { ...navigationOptions };
       captured = copyIntent(intent);
+      stub.intent = captured;
+      if (intent.operation === "resume") {
+        const top = snapshot.top;
+        const interception = top ? records.get(top.id)?.interception : undefined;
+        if (
+          top &&
+          interception &&
+          !constraints.scopeSignal?.aborted &&
+          (constraints.pageId === undefined || constraints.pageId === top.id)
+        ) {
+          stub.binding = { pageId: top.id, interception, scopeSignal: constraints.scopeSignal };
+          stub.resumedFromId = interception.id;
+          stub.info = interception.info;
+        }
+      }
+      if (Object.hasOwn(navigationOptions, "info")) stub.info = navigationOptions.info;
       const signal = navigationOptions.signal;
       if (
         signal !== undefined &&
@@ -696,6 +831,7 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         !["user", "program", "native", "keyboard"].includes(navigationOptions.reason)
       )
         throw new TypeError("Invalid navigation reason.");
+      stub.reason = navigationOptions.reason ?? "program";
     } catch (cause) {
       return Promise.resolve(
         result(stub, {
@@ -704,6 +840,11 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         }),
       );
     }
+    if (constraints.failure)
+      return Promise.resolve(result(stub, { status: "failed", error: constraints.failure }));
+    // 无有效拦截时立即终结，旧页面上下文不会因另一导航忙碌而改变恢复对象或进入队列。
+    if (intent.operation === "resume" && !stub.binding)
+      return Promise.resolve(result(stub, { status: "noop", reason: "not-intercepted" }));
     if (navigationOptions.signal?.aborted)
       return Promise.resolve(result(stub, { status: "cancelled", reason: "aborted" }));
     if (invokingGuard)
@@ -731,7 +872,7 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
       );
     return new Promise<NavigationResult>((resolve) => {
       const job: Job = {
-        id,
+        ...stub,
         intent: captured,
         options: { ...navigationOptions },
         abort: new AbortController(),
@@ -769,6 +910,7 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         };
       }
       queue.push(job);
+      requested(job);
       publish();
       queueMicrotask(() => {
         void drain();
@@ -788,15 +930,9 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
     try {
       dynamicDefinitions.set(name, definePages({ [name]: definition })[name]!);
     } catch (cause) {
-      return Promise.resolve(
-        result(
-          { id: ++navigationSeed, intent: { operation } },
-          {
-            status: "failed",
-            error: error("INVALID_CONFIG", "Invalid dynamic page definition.", cause),
-          },
-        ),
-      );
+      return enqueue({ operation, route: { name, params } }, opts, {
+        failure: error("INVALID_CONFIG", "Invalid dynamic page definition.", cause),
+      });
     }
     return enqueue({ operation, route: { name, params } }, opts).then((outcome) => {
       collectDefinitions();
@@ -826,6 +962,8 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         diagnostics.delete(listener);
       };
     },
+    beforeNavigate: lifecycle.beforeNavigate,
+    onNavigation: lifecycle.onNavigation,
     beforeEach(guard: NavigationGuard<C>) {
       if (typeof guard !== "function")
         throw new PageStackError("INVALID_CONFIG", "Navigation guard must be a function.");
@@ -863,6 +1001,7 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
       disposed = true;
       active?.abort.abort("disposed");
       transitionAbort?.abort("disposed");
+      const running = active;
       const pending = queue.splice(0);
       history = [];
       popups = [];
@@ -875,7 +1014,6 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
       publish();
       listeners.clear();
       guards.clear();
-      diagnostics.clear();
       dynamicDefinitions.clear();
       renderer = undefined;
       rendererDuration = undefined;
@@ -884,9 +1022,21 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         job.removeSignal();
         job.resolve(result(job, { status: "cancelled", reason: "disposed" }));
       }
+      if (running) {
+        running.removeSignal();
+        running.resolve(result(running, { status: "cancelled", reason: "disposed" }));
+      }
+      lifecycle.close();
+      diagnostics.clear();
     },
   });
   bindController(stack, {
+    resume(id, opts, scopeSignal) {
+      return enqueue({ operation: "resume" }, opts, {
+        pageId: id,
+        ...(scopeSignal ? { scopeSignal } : {}),
+      });
+    },
     reserveView() {
       if (disposed) throw new PageStackError("DISPOSED", "Cannot bind a view to a disposed stack.");
       if (viewLease || renderer)
@@ -930,7 +1080,7 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
   const ready = input.initial
     ? enqueue({ operation: "reset", routes: input.initial })
     : Promise.resolve(
-        result({ id: 0, intent: { operation: "reset" } }, { status: "noop", reason: "empty" }),
+        result(requestState(0, { operation: "reset" }), { status: "noop", reason: "empty" }),
       );
   return stack;
 }

@@ -38,6 +38,9 @@ export type Operation =
   | "resume";
 export interface GuardContext {
   readonly operation: Operation;
+  /** 本次执行的业务附加信息；框架不解析其内容，也不将其作为页面参数。 */
+  readonly info: unknown;
+  readonly resumedFromId: number | undefined;
   readonly from: ResolvedRoute | undefined;
   readonly to: ResolvedRoute | undefined;
   readonly signal: AbortSignal;
@@ -108,6 +111,8 @@ export type TransitionOutcome = "skipped" | "completed" | "failed" | "timed-out"
 interface ResultBase {
   readonly id: number;
   readonly operation: Operation;
+  readonly info: unknown;
+  readonly resumedFromId: number | undefined;
   readonly state: StackSnapshot;
 }
 export type NavigationResult =
@@ -129,10 +134,38 @@ export type NavigationResult =
       readonly error: import("./errors.js").PageStackError;
     });
 export interface NavigationOptions {
+  /** 按引用传递；省略时普通导航为空，恢复导航继承原拦截，显式 undefined 可清空。 */
+  readonly info?: unknown;
   readonly signal?: AbortSignal;
   readonly reason?: "user" | "program" | "native" | "keyboard";
   readonly clearCache?: boolean;
 }
+
+/** 请求中的目标尚未经过页面校验；重定向不改写它，最终页面从结果快照读取。 */
+export interface NavigationRequest {
+  readonly id: number;
+  readonly operation: Operation;
+  readonly route?: RouteInput;
+  readonly routes?: readonly RouteInput[];
+  readonly delta?: number;
+  readonly reason: NonNullable<NavigationOptions["reason"]>;
+  readonly info: unknown;
+  readonly resumedFromId: number | undefined;
+}
+export interface BeforeNavigateContext extends NavigationRequest {
+  readonly from: ResolvedRoute | undefined;
+  readonly signal: AbortSignal;
+}
+export type BeforeNavigateResult = boolean | void | { readonly info: unknown };
+export type BeforeNavigate = (
+  navigation: BeforeNavigateContext,
+) => GuardReturn<BeforeNavigateResult>;
+/** requested 记录调用，settled 记录唯一结果；观察回调的返回值不影响导航。 */
+export type NavigationEvent =
+  | (NavigationRequest & { readonly type: "requested" })
+  | (NavigationRequest & { readonly type: "settled"; readonly result: NavigationResult });
+export type NavigationListener = (event: NavigationEvent) => void;
+
 export interface StackOptions<C extends PageCatalog> {
   readonly pages: C;
   readonly initial?: NonEmpty<Route<C, "page" | "tab">>;
@@ -158,6 +191,8 @@ export interface StackOptions<C extends PageCatalog> {
   /** 弹窗覆盖层容量，默认 32，必须为正整数。 */
   readonly maxPopups?: number;
   readonly beforeEach?: NavigationGuard<C>;
+  readonly beforeNavigate?: BeforeNavigate;
+  readonly onNavigation?: NavigationListener;
   readonly onError?: (diagnostic: Diagnostic) => void;
 }
 export interface Diagnostic {
@@ -185,6 +220,8 @@ export interface PageStack<C extends PageCatalog = PageCatalog> {
   subscribe(listener: (state: StackSnapshot) => void): () => void;
   onError(listener: (diagnostic: Diagnostic) => void): () => void;
   beforeEach(guard: NavigationGuard<C>): () => void;
+  beforeNavigate(handler: BeforeNavigate): () => void;
+  onNavigation(listener: NavigationListener): () => void;
   push(route: Route<C, "page">, options?: NavigationOptions): Promise<NavigationResult>;
   replace(route: Route<C, "page">, options?: NavigationOptions): Promise<NavigationResult>;
   reset(

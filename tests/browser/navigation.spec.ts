@@ -294,3 +294,54 @@ test("宿主关闭键盘和焦点管理后，弹窗不自动抢焦点或消费 E
   await idle(page);
   await expect(dialog).toHaveCount(0);
 });
+
+test("导航 info 经统一预处理和登录恢复后仍可在全局事件中准确关联", async ({ page }) => {
+  await page.evaluate(async () => {
+    const stack = (window as any).lab.stack;
+    const telemetry = { prepared: [] as number[], events: [] as any[], guards: [] as string[] };
+    (window as any).infoTelemetry = telemetry;
+    stack.onNavigation((event: any) => telemetry.events.push(event));
+    stack.beforeNavigate((navigation: any) => {
+      telemetry.prepared.push(navigation.id);
+      return { info: navigation.info };
+    });
+    stack.beforeEach((guard: any) => {
+      if (guard.info?.business === "browser") telemetry.guards.push(guard.to.name);
+    });
+    await stack.switchTab({ name: "orders" }, { info: { business: "browser" } });
+  });
+  await expect(main(page).getByRole("heading", { name: "Login", exact: true })).toBeVisible();
+  await main(page).getByRole("button", { name: "Sign in and resume", exact: true }).click();
+  await idle(page);
+  await expect(main(page).getByRole("heading", { name: "Orders", exact: true })).toBeVisible();
+  const telemetry = await page.evaluate(() => {
+    const { prepared, events, guards } = (window as any).infoTelemetry;
+    return {
+      prepared,
+      pairs: events.map((event: any) => [event.type, event.id]),
+      results: events
+        .filter((event: any) => event.type === "settled")
+        .map((event: any) => ({
+          id: event.id,
+          resumedFromId: event.resumedFromId,
+          info: event.info,
+          target: event.result.state.top.name,
+        })),
+      guards,
+    };
+  });
+  expect(telemetry.prepared).toHaveLength(2);
+  expect(telemetry.pairs).toEqual([
+    ["requested", telemetry.prepared[0]],
+    ["settled", telemetry.prepared[0]],
+    ["requested", telemetry.prepared[1]],
+    ["settled", telemetry.prepared[1]],
+  ]);
+  expect(telemetry.results[1].resumedFromId).toBe(telemetry.results[0].id);
+  expect(telemetry.results.map((result: any) => result.info)).toEqual([
+    { business: "browser" },
+    { business: "browser" },
+  ]);
+  expect(telemetry.results.map((result: any) => result.target)).toEqual(["login", "orders"]);
+  expect(telemetry.guards).toEqual(["login", "orders"]);
+});
