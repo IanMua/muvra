@@ -1,6 +1,7 @@
 import type { Component, ComputedRef } from "vue";
 import type { ExtensionDefinition } from "./layers/extensions.js";
-import type { TransitionEffect } from "./animation/types.js";
+import type { ProgressTransition, TransitionEffect } from "./animation/types.js";
+import type { LayerContent } from "./layers/types.js";
 
 /** 页面目录同时决定运行时种类和调用参数，避免字符串注册与全局类型声明脱节。 */
 export type PageKind = "page" | "tab" | "popup";
@@ -58,7 +59,7 @@ export interface PageOptions {
   readonly meta?: Readonly<Record<string, unknown>>;
   readonly beforeEnter?: NavigationGuard;
   /** 前进时进入页优先，返回或关闭弹窗时离开页优先；false 显式禁用。 */
-  readonly transition?: TransitionDriver | TransitionEffect | false;
+  readonly transition?: TransitionDriver | TransitionEffect | ProgressTransition | false;
   /** 宿主可校验运行时输入；返回字符串时使用该字符串解释校验失败。 */
   readonly validate?: (params: unknown) => boolean | string | void;
 }
@@ -92,6 +93,30 @@ export interface RenderedPage {
   readonly focused: boolean;
   readonly zIndex: number;
 }
+/** 宿主在手势前读取接管状态。有目标时，令牌只在该返回候选有效期间可用。 */
+export type BackState =
+  | { readonly mode: "delegate" | "busy" }
+  | { readonly mode: "commit-only" | "interactive"; readonly token: string };
+
+export interface BackSession {
+  /** 进度可双向变化，只影响预览画面。 */
+  update(progress: number): void;
+  cancel(): void;
+  /** 确认才发出正式导航。已失效的会话没有导航结果，重复确认复用同一个结果。 */
+  commit(): Promise<NavigationResult | undefined>;
+}
+
+export interface BackPreviewContext {
+  readonly operation: "back" | "closePopup";
+  readonly from: ResolvedRoute;
+  readonly to: ResolvedRoute;
+}
+
+/** 应用按候选选择复用已挂载页面、提供只读图层，或交给普通返回。 */
+export type BackPreviewProvider = (
+  context: BackPreviewContext,
+) => "mounted" | LayerContent | undefined;
+
 export interface StackSnapshot {
   readonly revision: number;
   readonly phase: "idle" | "guard" | "transition" | "disposed";
@@ -103,6 +128,7 @@ export interface StackSnapshot {
   readonly current: ResolvedRoute | undefined;
   readonly top: ResolvedRoute | undefined;
   readonly canGoBack: boolean;
+  readonly back: BackState;
   readonly busy: boolean;
   readonly queued: number;
   readonly disposed: boolean;
@@ -240,6 +266,7 @@ export interface PageStack<C extends PageCatalog = PageCatalog> {
   ): Promise<NavigationResult>;
   closePopup(options?: NavigationOptions): Promise<NavigationResult>;
   back(delta?: number, options?: NavigationOptions): Promise<NavigationResult>;
+  beginBack(token: string, options?: NavigationOptions): BackSession | undefined;
   resume(options?: NavigationOptions): Promise<NavigationResult>;
   /** 只回收当前未渲染的缓存实例，逻辑历史中的页面可在返回时重新创建。 */
   clearCache(): Promise<number>;

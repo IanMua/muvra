@@ -1,6 +1,6 @@
 import { PageStackError } from "../errors.js";
-import type { Operation, PageOptions, TransitionDriver } from "../types.js";
-import type { TransitionEffect } from "./types.js";
+import type { Operation, PageOptions } from "../types.js";
+import type { ProgressTransition, TransitionEffect } from "./types.js";
 
 /** 为自动截止时间保留 1000ms 余量，防止浏览器定时器溢出后立即超时。 */
 export function milliseconds(value: number, name = "duration"): number {
@@ -21,12 +21,24 @@ export function isTransitionEffect(value: unknown): value is TransitionEffect {
     typeof value.run === "function"
   );
 }
+export function isProgressTransition(value: unknown): value is ProgressTransition {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    "kind" in value &&
+    value.kind === "progress" &&
+    "duration" in value &&
+    typeof value.duration === "number" &&
+    "prepare" in value &&
+    typeof value.prepare === "function"
+  );
+}
 export function validTransition(value: unknown): boolean {
   return (
     value === undefined ||
     value === false ||
     typeof value === "function" ||
-    (isTransitionEffect(value) &&
+    ((isTransitionEffect(value) || isProgressTransition(value)) &&
       Number.isSafeInteger(value.duration) &&
       value.duration >= 0 &&
       value.duration <= 2_147_482_647)
@@ -45,8 +57,8 @@ export function selectTransition(
   operation: Operation,
   from: PageOptions["transition"],
   to: PageOptions["transition"],
-  fallback: TransitionDriver | TransitionEffect | false,
-): TransitionDriver | TransitionEffect | false {
+  fallback: NonNullable<PageOptions["transition"]>,
+): NonNullable<PageOptions["transition"]> {
   return operation === "back" || operation === "closePopup"
     ? (from ?? to ?? fallback)
     : (to ?? from ?? fallback);

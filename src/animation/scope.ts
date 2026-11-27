@@ -5,17 +5,18 @@ import type { TransitionContext } from "../types.js";
 import { milliseconds } from "./effect.js";
 import type {
   EffectTiming,
+  ProgressTransition,
   TransitionEffect,
   TransitionEnvironment,
   TransitionScope,
 } from "./types.js";
 
-/** 一次播放只拥有自己的资源；中止同步清理，迟到的业务 Promise 仍被消费且不能再申请资源。 */
-export async function runTransition(
-  effect: TransitionEffect,
+/** 同一作用域供编排和进度转场使用，关闭后迟到的任务不能重新申请资源。 */
+function createTransitionScope(
   context: TransitionContext,
-  environment: TransitionEnvironment = {},
-): Promise<void> {
+  environment: TransitionEnvironment,
+  coalesceStyles = false,
+) {
   const abort = new AbortController();
   const cleanupErrors: unknown[] = [];
   const resources = createResourceScope((error) => {
@@ -24,6 +25,7 @@ export async function runTransition(
     environment.onCleanupError?.(error);
   });
   const pending = new Set<Promise<unknown>>();
+  const originalStyles = coalesceStyles ? new WeakMap<HTMLElement, Set<string>>() : undefined;
   let closed = false;
   let hasFailure = false;
   let failure: unknown;
@@ -38,6 +40,7 @@ export async function runTransition(
   const close = () => {
     if (closed) return;
     closed = true;
+    context.signal.removeEventListener("abort", close);
     abort.abort(context.signal.reason ?? "transition-finished");
     resources.dispose();
   };
@@ -147,13 +150,22 @@ export async function runTransition(
     style(target, properties) {
       active();
       if (!target) return;
+      let saved = originalStyles?.get(target);
+      if (originalStyles && !saved) {
+        saved = new Set();
+        originalStyles.set(target, saved);
+      }
       for (const [property, value] of Object.entries(properties)) {
-        const previous = target.style.getPropertyValue(property);
-        const priority = target.style.getPropertyPriority(property);
-        own(() => {
-          if (previous) target.style.setProperty(property, previous, priority);
-          else target.style.removeProperty(property);
-        });
+        // 每个属性记一次基线，长手势逐帧写样式也只持有一份回收记录。
+        if (!saved?.has(property)) {
+          const previous = target.style.getPropertyValue(property);
+          const priority = target.style.getPropertyPriority(property);
+          own(() => {
+            if (previous) target.style.setProperty(property, previous, priority);
+            else target.style.removeProperty(property);
+          });
+          saved?.add(property);
+        }
         target.style.setProperty(property, value);
       }
     },
@@ -181,16 +193,75 @@ export async function runTransition(
   };
   context.signal.addEventListener("abort", close, { once: true });
   if (context.signal.aborted) close();
+  async function run(play: () => void | PromiseLike<void>): Promise<void> {
+    try {
+      await play();
+      while (pending.size) await Promise.all([...pending]);
+      active();
+    } catch (error) {
+      throw hasFailure ? failure : error;
+    } finally {
+      close();
+      if (cleanupErrors.length && !hasFailure && !context.signal.aborted)
+        throw new AggregateError(cleanupErrors, "Transition resources could not all be released.");
+    }
+  }
+  return { scope, active, run, dispose: close };
+}
+
+export function runTransition(
+  effect: TransitionEffect,
+  context: TransitionContext,
+  environment: TransitionEnvironment = {},
+): Promise<void> {
+  const lifetime = createTransitionScope(context, environment);
+  return lifetime.run(() => lifetime.scope.play(effect));
+}
+
+/** 手势确认从最后一帧继续，普通导航从零播放，清理逻辑都由同一作用域承担。 */
+export function createProgressPlayback(
+  effect: ProgressTransition,
+  context: TransitionContext,
+  environment: TransitionEnvironment,
+) {
+  const lifetime = createTransitionScope(context, environment, true);
+  const { scope } = lifetime;
   try {
-    await scope.play(effect);
-    while (pending.size) await Promise.all([...pending]);
-    active();
-  } catch (error) {
-    throw hasFailure ? failure : error;
-  } finally {
-    context.signal.removeEventListener("abort", close);
-    close();
-    if (cleanupErrors.length && !hasFailure && !context.signal.aborted)
-      throw new AggregateError(cleanupErrors, "Transition resources could not all be released.");
+    lifetime.active();
+    const draw = effect.prepare({
+      ...context,
+      signal: scope.signal,
+      document: scope.document,
+      style: scope.style,
+      layer: scope.layer,
+      onCleanup: scope.onCleanup,
+    });
+    if (typeof draw !== "function")
+      throw new PageStackError(
+        "INVALID_CONFIG",
+        "A progress transition must return a frame function.",
+      );
+    let position = 0;
+    function seek(progress: number): void {
+      lifetime.active();
+      position = progress;
+      draw(progress);
+    }
+    return {
+      seek,
+      settle(target: 0 | 1) {
+        const start = position;
+        const duration = Math.round(effect.duration * Math.abs(target - start));
+        return lifetime.run(() =>
+          duration
+            ? scope.frame((progress) => seek(start + (target - start) * progress), { duration })
+            : seek(target),
+        );
+      },
+      dispose: lifetime.dispose,
+    };
+  } catch (cause) {
+    lifetime.dispose();
+    throw cause;
   }
 }

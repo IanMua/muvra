@@ -15,6 +15,7 @@ import {
   shallowRef,
   Suspense,
   watch,
+  watchPostEffect,
 } from "vue";
 import type { ComputedRef, PropType, Ref, VNodeChild } from "vue";
 import { isFocusable, tabbable } from "tabbable";
@@ -27,20 +28,27 @@ import { LayerStackView } from "./layers/vue.js";
 import { createExtensionHost } from "./layers/extensions.js";
 import type { ExtensionHost } from "./layers/extensions.js";
 import type { LayerHandle } from "./layers/types.js";
-import { isTransitionEffect, selectTransition, validTransition } from "./animation/effect.js";
-import { runTransition } from "./animation/scope.js";
-import type { TransitionEffect } from "./animation/types.js";
+import {
+  isProgressTransition,
+  isTransitionEffect,
+  selectTransition,
+  validTransition,
+} from "./animation/effect.js";
+import { createProgressPlayback, runTransition } from "./animation/scope.js";
+import type { TransitionEnvironment } from "./animation/types.js";
 import type { RenderRequest } from "./internal.js";
 import { notify } from "./notifications.js";
+import { createBackPreviewRenderer } from "./vue-back-preview.js";
 import type {
+  BackPreviewProvider,
   PageCatalog,
   PageContext,
   PageNames,
+  PageOptions,
   PageStack,
   ParamsOf,
   ResolvedRoute,
   StackSnapshot,
-  TransitionDriver,
 } from "./types.js";
 
 /** 在组件或 effectScope 内订阅状态，作用域结束后自动退订。普通服务使用 stack.subscribe。 */
@@ -332,9 +340,10 @@ const viewProps = {
   },
   // true 允许声明的动画播放；框架不隐式添加视觉效果。
   transition: {
-    type: [Function, Boolean, Object] as PropType<TransitionDriver | TransitionEffect | boolean>,
+    type: [Function, Boolean, Object] as PropType<NonNullable<PageOptions["transition"]> | true>,
     default: true,
   },
+  backPreview: Function as PropType<BackPreviewProvider>,
   keyboard: { type: Boolean, default: true },
   restoreFocus: { type: Boolean, default: true },
 } as const;
@@ -360,6 +369,7 @@ const BoundPageStackView = defineComponent({
     const layers = createLayerStack({ onError: reportLayer });
     const pageGroup = Symbol("navigation-pages");
     const bindings = new Map<number, { layer: LayerHandle; extensions: ExtensionHost }>();
+    let revealed: { id: number } | undefined;
     function reconcile(value: StackSnapshot) {
       layers.batch(() => {
         const alive = new Set(value.rendered.map((entry) => entry.route.id));
@@ -399,7 +409,10 @@ const BoundPageStackView = defineComponent({
                     extensions,
                     pageProps: props.pageProps,
                     onReady: () => {
-                      void nextTick().then(maybeFocus);
+                      void nextTick().then(() => {
+                        maybeFocus();
+                        controller.refreshBack();
+                      });
                     },
                   },
                   {
@@ -410,7 +423,7 @@ const BoundPageStackView = defineComponent({
             });
           }
           binding.layer.update({
-            visible: entry.visible,
+            visible: entry.visible || revealed?.id === entry.route.id,
             interactive: entry.focused && value.phase !== "transition",
             attrs: {
               "data-page-id": entry.route.id,
@@ -502,7 +515,87 @@ const BoundPageStackView = defineComponent({
         fallback,
       );
     };
+    const reducedMotion = ref(false);
+    let stopMotion: (() => void) | undefined;
+    function transitionEnvironment(
+      route: ResolvedRoute | undefined,
+      navigationId: number | undefined,
+    ): TransitionEnvironment {
+      return {
+        document: container.value?.ownerDocument,
+        createLayer(component, componentProps, fail) {
+          const foreground = layers
+            .getSnapshot()
+            .layers.filter((entry) => entry.visible)
+            .at(-1)?.anchor;
+          const layer = layers.create({
+            ...(foreground ? { placement: { above: foreground } } : {}),
+            attrs: { "data-page-stack-effect-layer": "", "aria-hidden": "true", inert: true },
+            ...(component ? { content: () => h(component, componentProps) } : {}),
+            onError: fail,
+          });
+          // 延迟申请挂载 Promise，避免申请期间同步取消后出现未被消费的拒绝。
+          return {
+            get element() {
+              return layer.element!;
+            },
+            get ready() {
+              return layer.whenMounted().then(() => {});
+            },
+            dispose: layer.dispose,
+          };
+        },
+        onCleanupError: (cause) =>
+          controller.report({
+            error: new PageStackError("TRANSITION_ERROR", "Transition cleanup failed.", cause),
+            navigationId,
+            route,
+            severity: "warning",
+          }),
+      };
+    }
+    const backPreview = createBackPreviewRenderer({
+      layers,
+      layerFor: (id) => bindings.get(id)?.layer,
+      reveal(id) {
+        const lease = { id };
+        revealed = lease;
+        bindings.get(id)?.layer.update({ visible: true });
+        return () => {
+          if (revealed !== lease) return;
+          revealed = undefined;
+          const entry = state.value.rendered.find((page) => page.route.id === id);
+          if (entry) bindings.get(id)?.layer.update({ visible: entry.visible });
+        };
+      },
+      transition: transitionFor,
+      provider: () => props.backPreview,
+      environment: (route) => transitionEnvironment(route, undefined),
+      reducedMotion: () => reducedMotion.value,
+      report: (cause, route) =>
+        controller.report({
+          error: new PageStackError("TRANSITION_ERROR", "Back preview failed.", cause),
+          navigationId: undefined,
+          route,
+          severity: "warning",
+        }),
+    });
+    watchPostEffect(() => {
+      // 模板更新后 DOM 才就绪。只在能力变化时发布快照，进度留在预览渲染器。
+      if (!state.value.busy && !state.value.disposed) controller.refreshBack();
+    });
     onMounted(() => {
+      const motion = container.value?.ownerDocument?.defaultView?.matchMedia?.(
+        "(prefers-reduced-motion: reduce)",
+      );
+      if (motion) {
+        const update = () => {
+          reducedMotion.value = motion.matches;
+        };
+        update();
+        motion.addEventListener?.("change", update);
+        stopMotion = () => motion.removeEventListener?.("change", update);
+      }
       detach = controller.attachRenderer(
         async (request) => {
           // 异步清理可能晚于下一次导航，上报时必须保留本次播放的导航标识。
@@ -514,10 +607,7 @@ const BoundPageStackView = defineComponent({
           const from = elementFor(request.from?.id);
           const to = elementFor(request.to?.id);
           if (!from && !to) return false;
-          const reduced =
-            typeof matchMedia !== "undefined" &&
-            matchMedia("(prefers-reduced-motion: reduce)").matches;
-          if (reduced) return false;
+          if (reducedMotion.value) return false;
           const context = {
             operation: request.operation,
             from,
@@ -527,54 +617,23 @@ const BoundPageStackView = defineComponent({
             durationMs: request.durationMs,
             signal: request.signal,
           };
-          if (isTransitionEffect(driver)) {
-            await runTransition(driver, context, {
-              document: container.value?.ownerDocument,
-              createLayer(component, componentProps, fail) {
-                const foreground = layers
-                  .getSnapshot()
-                  .layers.filter((entry) => entry.visible)
-                  .at(-1)?.anchor;
-                const layer = layers.create({
-                  ...(foreground ? { placement: { above: foreground } } : {}),
-                  attrs: { "data-page-stack-effect-layer": "", "aria-hidden": "true", inert: true },
-                  ...(component ? { content: () => h(component, componentProps) } : {}),
-                  onError: fail,
-                });
-                // 延迟申请挂载 Promise，避免申请期间同步取消后出现未被消费的拒绝。
-                return {
-                  get element() {
-                    return layer.element!;
-                  },
-                  get ready() {
-                    return layer.whenMounted().then(() => {});
-                  },
-                  dispose: layer.dispose,
-                };
-              },
-              onCleanupError: (cause) =>
-                controller.report({
-                  error: new PageStackError(
-                    "TRANSITION_ERROR",
-                    "Transition cleanup failed.",
-                    cause,
-                  ),
-                  navigationId,
-                  route: request.to,
-                  severity: "warning",
-                }),
-            });
-          } else await driver(context);
+          const environment = transitionEnvironment(request.to, navigationId);
+          if (isProgressTransition(driver))
+            await createProgressPlayback(driver, context, environment).settle(1);
+          else if (isTransitionEffect(driver)) await runTransition(driver, context, environment);
+          else await driver(context);
           return true;
         },
         (request) => {
           const driver = transitionFor(request);
-          return !driver ? 0 : isTransitionEffect(driver) ? driver.duration : request.durationMs;
+          return !driver ? 0 : typeof driver === "object" ? driver.duration : request.durationMs;
         },
+        backPreview,
       );
       maybeFocus();
     });
     onBeforeUnmount(() => {
+      stopMotion?.();
       detach?.();
       lastFocus.clear();
     });
@@ -653,6 +712,13 @@ export const PageStackView = defineComponent({
       },
       { flush: "sync" },
     );
-    return () => h(BoundPageStackView, { ...attrs, ...props, key: binding.value }, slots);
+    return () => {
+      const { backPreview, ...rest } = props;
+      return h(
+        BoundPageStackView,
+        { ...attrs, ...rest, ...(backPreview ? { backPreview } : {}), key: binding.value },
+        slots,
+      );
+    };
   },
 });

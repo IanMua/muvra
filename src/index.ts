@@ -7,10 +7,20 @@ export { handleNativeBack } from "./native-back.js";
 export { isPage } from "./selectors.js";
 export { lazy } from "./lazy.js";
 export { defineTransition, compose, sequence } from "./animation/effect.js";
-export type { TransitionEffect, TransitionScope, EffectTiming } from "./animation/types.js";
+export type {
+  EffectTiming,
+  ProgressTransition,
+  ProgressTransitionScope,
+  TransitionEffect,
+  TransitionScope,
+} from "./animation/types.js";
 export type { ErrorCode } from "./errors.js";
 export type { ComponentInputs, LazyPageComponent, PageDefiner } from "./component-inputs.js";
 export type {
+  BackPreviewContext,
+  BackPreviewProvider,
+  BackSession,
+  BackState,
   CatalogEntry,
   BeforeNavigate,
   BeforeNavigateContext,

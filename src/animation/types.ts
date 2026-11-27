@@ -6,6 +6,12 @@ export interface TransitionEffect {
   readonly duration: number;
   readonly run: (scope: TransitionScope) => void | PromiseLike<void>;
 }
+/** 同一组画面既可以按时间播放，也可以由外部进度定位。prepare 每次转场只调用一次。 */
+export interface ProgressTransition {
+  readonly kind: "progress";
+  readonly duration: number;
+  readonly prepare: (scope: ProgressTransitionScope) => (progress: number) => void;
+}
 export interface EffectTiming {
   readonly duration?: number;
   readonly delay?: number;
@@ -24,6 +30,11 @@ export interface TransitionScope extends TransitionContext {
   onCleanup(cleanup: () => void): void;
   play(effect: TransitionEffect): Promise<void>;
 }
+/** 进度的推进由框架管理，定义只获得画面和本次转场的资源。 */
+export type ProgressTransitionScope = Pick<
+  TransitionScope,
+  keyof TransitionContext | "document" | "style" | "layer" | "onCleanup"
+>;
 /** 渲染器提供图层租约，动画模块不依赖 Vue 的组件树或导航内核。 */
 export interface TransitionEnvironment {
   readonly document?: Document | undefined;

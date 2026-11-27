@@ -53,6 +53,10 @@ const stack=api.createPageStack({pages:{home:api.tab(component),order:api.page(c
 await stack.ready;await stack.push({name:'order',params:{id:'42'}});assert.equal(stack.getSnapshot().current.params.id,'42');
 await stack.openPopup({name:'dialog'});assert.equal(api.handleNativeBack(stack),'handled');
 await new Promise(r=>setTimeout(r,0));assert.equal(stack.getSnapshot().popups.length,0);
+const back=stack.getSnapshot().back;assert.equal(back.mode,'commit-only');
+const gesture=stack.beginBack(back.token,{reason:'native'});assert.ok(gesture);
+gesture.cancel();assert.equal(await gesture.commit(),undefined);
+assert.equal((await stack.beginBack(back.token).commit()).state.top.name,'home');
 await assert.rejects(import('muvra/dist/internal.js'),e=>e.code==='ERR_PACKAGE_PATH_NOT_EXPORTED');
 const events=[];
 const stop=stack.onNavigation(event=>events.push(event));
@@ -65,10 +69,15 @@ stack.dispose();console.log(JSON.stringify({node:process.version,status:'consume
 `;
 const declarations = `import {h} from 'vue';
 import {createPageStack,definePages,page,tab,popup,PageStackView,usePage,isPage,handleNativeBack} from 'muvra';
+import type {BackState,ProgressTransition} from 'muvra';
 const component={render:()=>null};
 const pages=definePages({home:tab(component),order:page.withParams<{id:string}>()(component),dialog:popup.withParams<{message:string}>()(component)});
 const stack=createPageStack({pages,initial:[{name:'home'}]});
 h(PageStackView,{stack,transition:false,pageProps:{tenant:'example'}});
+const slide:ProgressTransition={kind:'progress',duration:160,prepare:scope=>progress=>scope.style(scope.from,{opacity:String(1-progress)})};
+h(PageStackView,{stack,transition:slide,backPreview:()=>'mounted' as const});
+const back:BackState=stack.getSnapshot().back;
+if('token' in back) stack.beginBack(back.token)?.update(0.5);
 stack.push({name:'order',params:{id:'1'}});
 const context=()=>usePage(stack,'order').params.value.id;
 const route=stack.getSnapshot().current;if(isPage(stack,route,'order')){const id:string=route.params.id;void id;}

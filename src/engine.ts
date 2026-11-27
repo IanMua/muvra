@@ -5,12 +5,22 @@ import { createRecordStore } from "./record-store.js";
 import type { Plan } from "./planner.js";
 import { notify } from "./notifications.js";
 import { createNavigationLifecycle } from "./navigation-lifecycle.js";
+import { createBackInteraction } from "./interactive-back.js";
 import { Interrupted, PageStackError } from "./errors.js";
 import { bindController } from "./internal.js";
-import type { HookKind, InternalPage, Intent, Interception, RenderRequest } from "./internal.js";
+import type {
+  BackPreview,
+  BackRenderer,
+  HookKind,
+  InternalPage,
+  Intent,
+  Interception,
+  RenderRequest,
+} from "./internal.js";
 import type {
   BeforeNavigateContext,
   BeforeNavigateResult,
+  BackState,
   CatalogEntry,
   Diagnostic,
   DynamicArguments,
@@ -51,6 +61,7 @@ interface Job extends RequestState {
   abort: AbortController;
   resolve(result: NavigationResult): void;
   removeSignal(): void;
+  preview?: BackPreview;
 }
 type RuntimeGuard = (context: GuardContext) => GuardReturn<GuardDecision>;
 type Outcome =
@@ -171,9 +182,19 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
   let active: Job | undefined;
   let renderer: ((request: RenderRequest) => Promise<boolean>) | undefined;
   let rendererDuration: ((request: Omit<RenderRequest, "signal">) => number) | undefined;
+  let backRenderer: BackRenderer | undefined;
   let transitionAbort: AbortController | undefined;
   let viewLease: symbol | undefined;
   let snapshot: StackSnapshot;
+  const backInteraction = createBackInteraction((navigationOptions, preview) => {
+    const result = enqueue(
+      { operation: "back", delta: 1 },
+      navigationOptions,
+      preview ? { preview } : {},
+    );
+    // 入队前就被拒绝时，句柄也要释放。
+    return preview ? result.finally(() => preview.dispose()) : result;
+  });
 
   const catalog = Object.freeze(
     Object.entries(pages).map(([name, definition]) =>
@@ -211,7 +232,30 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
   ): PageStackError {
     return cause instanceof PageStackError ? cause : new PageStackError(code, message, cause);
   }
-  function publish(): void {
+  const isBusy = () => !disposed && (active !== undefined || queue.length > 0);
+  function backState(): BackState {
+    if (isBusy() || disposed) return backInteraction.state(undefined, isBusy());
+    const next = plan({ operation: "back", delta: 1 }, history, popups, false);
+    const target =
+      !next.noop &&
+      next.from &&
+      next.to &&
+      (next.operation === "back" || next.operation === "closePopup")
+        ? {
+            operation: next.operation,
+            from: next.from,
+            to: next.to,
+            durationMs: options.transitionDurationMs,
+          }
+        : undefined;
+    return backInteraction.state(target, false, backRenderer);
+  }
+  function refreshBack(): void {
+    const next = backState();
+    if (snapshot.back !== next) publish(next);
+    backInteraction.withdrawPreview();
+  }
+  function publish(back = backState()): void {
     const top = popups.at(-1) ?? history.at(-1);
     const current = history.at(-1);
     const visible = new Set<number>(popups.map((route) => route.id));
@@ -251,7 +295,8 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
       current,
       top,
       canGoBack: popups.length > 0 || history.length > 1,
-      busy: !disposed && (active !== undefined || queue.length > 0),
+      back,
+      busy: isBusy(),
       queued: queue.length,
       disposed,
     });
@@ -600,12 +645,12 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         ? Math.max(options.transitionTimeoutMs, durationMs + 1_000)
         : options.transitionTimeoutMs;
       const ran = await settle(
-        () =>
-          run({
-            ...request,
-            durationMs,
-            signal: abort.signal,
-          }),
+        () => {
+          const rendering = { ...request, durationMs, signal: abort.signal };
+          return job.preview
+            ? job.preview.complete(rendering).then((played) => played || run(rendering))
+            : run(rendering);
+        },
         {
           signal: abort.signal,
           timeoutMs,
@@ -645,6 +690,11 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
     if (job.intent.operation === "resume" && !validResume(job))
       return { status: "noop", reason: "not-intercepted" };
     if (job.abort.signal.aborted) throw new Interrupted(disposed ? "disposed" : "aborted");
+    // 进入守卫可能换掉目标，真实提交前释放原预览，再按最终计划转场。
+    if (next.redirected && job.preview) {
+      job.preview.dispose();
+      delete job.preview;
+    }
     const previousTop = popups.at(-1) ?? history.at(-1);
     history = next.history;
     popups = next.popups;
@@ -760,6 +810,7 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
             outcome = { status: "failed", error: failure };
           }
         }
+        job.preview?.dispose();
         job.removeSignal();
         active = undefined;
         phase = disposed ? "disposed" : "idle";
@@ -785,7 +836,12 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
   function enqueue(
     intent: Intent,
     navigationOptions: NavigationOptions = {},
-    constraints: { pageId?: number; scopeSignal?: AbortSignal; failure?: PageStackError } = {},
+    constraints: {
+      pageId?: number;
+      scopeSignal?: AbortSignal;
+      failure?: PageStackError;
+      preview?: BackPreview;
+    } = {},
   ): Promise<NavigationResult> {
     const id = ++navigationSeed;
     const stub = requestState(id, intent);
@@ -878,6 +934,7 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         abort: new AbortController(),
         resolve,
         removeSignal: () => {},
+        ...(constraints.preview ? { preview: constraints.preview } : {}),
       };
       const signal = navigationOptions.signal;
       const abort = () => {
@@ -885,6 +942,7 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         const index = queue.indexOf(job);
         if (index >= 0) {
           queue.splice(index, 1);
+          job.preview?.dispose();
           job.removeSignal();
           publish();
           resolve(result(job, { status: "cancelled", reason: "aborted" }));
@@ -909,7 +967,9 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
           );
         };
       }
+      // 正式导航优先于尚未确认的手势。已确认的预览由对应 job 持有。
       queue.push(job);
+      backInteraction.invalidate();
       requested(job);
       publish();
       queueMicrotask(() => {
@@ -985,9 +1045,11 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
     },
     closePopup: (opts) => enqueue({ operation: "closePopup" }, opts),
     back: (delta = 1, opts) => enqueue({ operation: "back", delta }, opts),
+    beginBack: (token, opts = {}) => backInteraction.begin(token, opts, backRenderer),
     resume: (opts) => enqueue({ operation: "resume" }, opts),
     clearCache: async () => {
       if (disposed) return 0;
+      backInteraction.invalidate();
       const count = records.size;
       store.prune(layers, true, options.maxCachedPages);
       collectDefinitions();
@@ -999,6 +1061,7 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
     dispose: () => {
       if (disposed) return;
       disposed = true;
+      backInteraction.invalidate();
       active?.abort.abort("disposed");
       transitionAbort?.abort("disposed");
       const running = active;
@@ -1017,12 +1080,15 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
       dynamicDefinitions.clear();
       renderer = undefined;
       rendererDuration = undefined;
+      backRenderer = undefined;
       viewLease = undefined;
       for (const job of pending) {
+        job.preview?.dispose();
         job.removeSignal();
         job.resolve(result(job, { status: "cancelled", reason: "disposed" }));
       }
       if (running) {
+        running.preview?.dispose();
         running.removeSignal();
         running.resolve(result(running, { status: "cancelled", reason: "disposed" }));
       }
@@ -1057,7 +1123,8 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         set?.delete(callback);
       };
     },
-    attachRenderer(run, duration) {
+    refreshBack,
+    attachRenderer(run, duration, back) {
       if (disposed)
         throw new PageStackError("DISPOSED", "Cannot attach a view to a disposed stack.");
       if (renderer)
@@ -1067,11 +1134,19 @@ export function createPageStack<const C extends PageCatalog>(input: StackOptions
         );
       renderer = run;
       rendererDuration = duration;
+      backRenderer = back;
+      backInteraction.invalidate();
+      refreshBack();
       return () => {
         if (renderer === run) {
           renderer = undefined;
           rendererDuration = undefined;
+          backRenderer = undefined;
+          backInteraction.invalidate();
           transitionAbort?.abort("renderer-detached");
+          active?.preview?.dispose();
+          for (const job of queue) job.preview?.dispose();
+          refreshBack();
         }
       };
     },

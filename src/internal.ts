@@ -7,6 +7,7 @@ import type {
   Diagnostic,
   NavigationOptions,
   NavigationResult,
+  BackPreviewContext,
 } from "./types.js";
 
 export type HookKind = "show" | "hide" | "unload";
@@ -48,6 +49,19 @@ export interface RenderRequest {
   durationMs: number;
   signal: AbortSignal;
 }
+export type BackTarget = BackPreviewContext & { readonly durationMs: number };
+/** 预览句柄随视图持有资源，内核只决定它何时可以跟随实际导航提交。 */
+export interface BackPreview {
+  update(progress: number): void;
+  rewind(): Promise<void>;
+  waitForCommit(): void;
+  complete(request: RenderRequest): Promise<boolean>;
+  dispose(): void;
+}
+export interface BackRenderer {
+  available(target: BackTarget): boolean;
+  start(target: BackTarget): BackPreview | undefined;
+}
 export interface InternalController {
   resume(
     id: number,
@@ -61,7 +75,9 @@ export interface InternalController {
   attachRenderer(
     run: (request: RenderRequest) => Promise<boolean>,
     duration?: (request: Omit<RenderRequest, "signal">) => number,
+    back?: BackRenderer,
   ): () => void;
+  refreshBack(): void;
   report(diagnostic: Diagnostic): void;
 }
 

@@ -10,7 +10,7 @@ import {
   sequence,
   tab,
 } from "../../src/index.js";
-import type { TransitionEffect, TransitionScope } from "../../src/index.js";
+import type { ProgressTransition, TransitionEffect, TransitionScope } from "../../src/index.js";
 const component = { render: () => null };
 const custom = defineTransition({
   duration: 200,
@@ -32,6 +32,22 @@ const pages = definePages({
 });
 const stack = createPageStack({ pages, initial: [{ name: "home" }] });
 h(PageStackView, { stack, transition: effect });
+const seekable: ProgressTransition = {
+  kind: "progress",
+  duration: 160,
+  prepare(scope) {
+    return (progress) => scope.style(scope.from, { opacity: String(1 - progress) });
+  },
+};
+h(PageStackView, { stack, transition: seekable, backPreview: () => "mounted" as const });
+const back = stack.getSnapshot().back;
+if ("token" in back) {
+  const session = stack.beginBack(back.token, { reason: "native", info: {} });
+  session?.update(0.5);
+  void session?.commit();
+}
+// @ts-expect-error 返回候选令牌必须来自快照。
+stack.beginBack(1);
 stack.push({ name: "detail", params: { orderNo: "42" } });
 // @ts-expect-error 动画声明仍要求数字时长。
 fade({ duration: "fast" });

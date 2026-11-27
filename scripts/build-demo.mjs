@@ -8,6 +8,7 @@ await build({
     props: "demo/props.ts",
     effects: "demo/effects.ts",
     layers: "demo/layers.ts",
+    "interactive-back-fixture": "tests/browser/fixtures/interactive-back.ts",
   },
   outdir: "demo",
   bundle: true,
