@@ -221,6 +221,240 @@ function onNativeGoBack(): boolean {
 
 该适配立即告知宿主网页已接管，再异步执行返回守卫/动画；拒绝返回或等待用户确认不会触发原生超时退出。再次返回可中止尚未提交的检查。根页的退出确认与系统退出仍由宿主管理。这是独立的桥接契约模拟，不能替代 Android / iOS 真机验收。
 
+### 交互式返回
+
+`getSnapshot().back` 可通过现有 `subscribe()` 同步给手势宿主。四种状态描述当前栈能如何处理一次返回。
+
+| `mode`        | 含义                                   |
+| ------------- | -------------------------------------- |
+| `delegate`    | 没有返回目标，交给宿主的下一层处理     |
+| `busy`        | 有正式导航正在处理                     |
+| `commit-only` | 有返回目标，确认时执行普通返回         |
+| `interactive` | 有返回目标和可用预览，拖动时可更新画面 |
+
+有目标的状态包含 `token`。用它调用 `stack.beginBack(token, options)`，一次会话绑定一组页面实例。当前有弹窗时返回关闭最上层弹窗，否则返回上一页。拖动通过 `update(progress)` 定位到 `0～1`，可以往回拖。取消回到原画面。预览期间目标页不可交互，页面焦点、导航生命周期和历史仍以当前页为准。
+
+`commit()` 才创建一次普通返回请求，复用 `NavigationOptions`、`beforeNavigate`、页面守卫与 `onNavigation`。守卫放行后才改栈，同一目标的预览从当前位置收尾。守卫跨帧等待时先恢复当前页供确认。拒绝时保留原栈，重定向时释放预览并按实际目标转场。重复确认复用结果。新导航、视图解绑、清理缓存或手势信号中止会结束尚未确认的会话，迟到的 `commit()` 返回 `undefined`。
+
+在现有 `transition` 选项声明 `ProgressTransition`。普通导航按时间调用同一帧函数，交互返回按手势进度调用。应用通过 `PageStackView.backPreview` 同步选择预览内容，此回调应保持无副作用。返回 `"mounted"` 复用已挂载目标，返回渲染函数提供只读预览，返回 `undefined` 使用普通返回。应用可以根据业务状态限制哪些内容适合预览。
+
+```ts
+import { h } from "vue";
+import { PageStackView } from "muvra";
+import type { ProgressTransition } from "muvra";
+
+const slide: ProgressTransition = {
+  kind: "progress",
+  duration: 220,
+  prepare(scope) {
+    const returning = scope.operation === "back" || scope.operation === "closePopup";
+    const page = returning ? scope.from : scope.to;
+    return (progress) => {
+      // 样式归本次播放，取消或完成时由作用域还原。
+      const offset = returning ? progress : 1 - progress;
+      scope.style(page, { transform: `translateX(${offset * 100}%)` });
+    };
+  },
+};
+
+h(PageStackView, {
+  stack,
+  transition: slide,
+  backPreview: ({ to }) => (to.name === "catalog" ? "mounted" : undefined),
+});
+```
+
+### 原生宿主接入示例
+
+以下示例用应用已有的可信 WebView 桥回传 `BackState`。宿主在手势开始前缓存状态，一次手势固定使用同一 ID 和令牌。重新加载 WebView 时用新的文档连接。没有开始事件的返回键可以走 `handleNativeBack()`，已经开始的手势用自己的会话收尾。
+
+```ts
+import { handleNativeBack } from "muvra";
+import type { BackSession, BackState } from "muvra";
+
+type BackMessage =
+  | { type: "ordinary" }
+  | { type: "start"; id: number; token: string }
+  | { type: "progress"; id: number; value: number }
+  | { type: "cancel" | "commit"; id: number };
+
+let latestId = 0;
+let active: { id: number; session: BackSession } | undefined;
+let lastState: BackState | undefined;
+function sendState(back: BackState) {
+  if (back === lastState) return;
+  lastState = back;
+  postBackState(back); // 通过应用的桥调用宿主的 sync(mode, token)。
+}
+
+Object.assign(window, {
+  muvraBack(message: BackMessage) {
+    if (message.type === "ordinary") return handleNativeBack(stack);
+    if (message.type === "start") {
+      if (message.id <= latestId) return;
+      latestId = message.id;
+      active?.session.cancel();
+      const session = stack.beginBack(message.token, { reason: "native" });
+      active = session ? { id: message.id, session } : undefined;
+      return;
+    }
+    // 终止事件先到时，也丢弃随后抵达的同一手势开始事件。
+    if (message.type !== "progress" && message.id > latestId) {
+      latestId = message.id;
+      active?.session.cancel();
+      active = undefined;
+      return;
+    }
+    if (active?.id !== message.id) return;
+    const { session } = active;
+    if (message.type === "progress") return session.update(message.value);
+    active = undefined;
+    if (message.type === "cancel") session.cancel();
+    else void session.commit();
+  },
+});
+const unsubscribeBack = stack.subscribe(({ back }) => sendState(back));
+sendState(stack.getSnapshot().back);
+```
+
+桥解绑时调用 `unsubscribeBack()`，取消活动会话并移除 `window.muvraBack`。宿主保留自身的动画选择、优先级与根页策略。
+
+#### Android · AndroidX Activity
+
+用 AndroidX Activity 1.8.0+，在宿主 Activity 启用 Predictive Back。通过 `onBackPressedDispatcher.addCallback(this, callback)` 绑定下面的回调。在主线程接收网页状态并调用 `sync`。Android 14+ 的进度事件进入会话，只有完成事件的设备经普通返回处理。根页空闲时提前让出系统回调。 [Android 进度回调](https://developer.android.com/guide/navigation/custom-back/support-animations-views) · [系统返回接管](https://developer.android.com/guide/navigation/custom-back/predictive-back-gesture#create-single-responsibility-callbacks)
+
+```kotlin
+import android.webkit.WebView
+import androidx.activity.BackEventCompat
+import androidx.activity.OnBackPressedCallback
+import org.json.JSONObject
+
+class MuvraBack(private val webView: WebView) : OnBackPressedCallback(false) {
+    private var mode = "delegate"
+    private var token: String? = null
+    private var nextId = 0
+    private var gesture: Int? = null
+
+    fun sync(mode: String, token: String?) {
+        this.mode = mode
+        this.token = token
+        if (gesture == null) isEnabled = mode != "delegate"
+    }
+
+    private fun send(message: JSONObject) {
+        val json = JSONObject.quote(message.toString())
+        webView.evaluateJavascript("window.muvraBack(JSON.parse($json))", null)
+    }
+
+    override fun handleOnBackStarted(event: BackEventCompat) {
+        val id = ++nextId
+        gesture = id
+        token?.let {
+            send(JSONObject().put("type", "start").put("id", id).put("token", it))
+        }
+    }
+
+    override fun handleOnBackProgressed(event: BackEventCompat) {
+        val id = gesture ?: return
+        send(JSONObject().put("type", "progress").put("id", id)
+            .put("value", event.progress.toDouble()))
+    }
+
+    private fun finish(type: String) {
+        val id = gesture ?: return
+        gesture = null
+        send(JSONObject().put("type", type).put("id", id))
+        isEnabled = mode != "delegate"
+    }
+
+    override fun handleOnBackCancelled() = finish("cancel")
+
+    override fun handleOnBackPressed() {
+        if (gesture != null) finish("commit")
+        else send(JSONObject().put("type", "ordinary"))
+    }
+}
+```
+
+#### iOS · UIKit 与 WKWebView
+
+在承载单个 `WKWebView` 的控制器中持有下列对象，在主线程调用 `sync`。这个示例配置左边缘，距离和速度阈值由宿主决定。空闲根页让出 UIKit 的返回手势。 [边缘手势](https://developer.apple.com/documentation/uikit/uiscreenedgepangesturerecognizer) · [UIKit 返回手势](https://developer.apple.com/documentation/uikit/uinavigationcontroller/interactivepopgesturerecognizer)
+
+```swift
+import UIKit
+import WebKit
+
+@MainActor
+final class MuvraEdgeBack: NSObject, UIGestureRecognizerDelegate {
+    private let pan = UIScreenEdgePanGestureRecognizer()
+    private let send: ([String: Any]) -> Void
+    private var mode = "delegate"
+    private var token: String?
+    private var nextID = 0
+    private var gesture: Int?
+
+    init(webView: WKWebView, nativePop: UIGestureRecognizer?, send: @escaping ([String: Any]) -> Void) {
+        self.send = send
+        super.init()
+        pan.edges = .left
+        pan.delegate = self
+        pan.addTarget(self, action: #selector(handle(_:)))
+        webView.allowsBackForwardNavigationGestures = false
+        webView.addGestureRecognizer(pan)
+        nativePop?.require(toFail: pan)
+    }
+
+    func sync(mode: String, token: String?) {
+        self.mode = mode
+        self.token = token
+    }
+
+    func detach() {
+        finish("cancel")
+        pan.view?.removeGestureRecognizer(pan)
+    }
+
+    func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+        mode != "delegate"
+    }
+
+    @objc private func handle(_ pan: UIScreenEdgePanGestureRecognizer) {
+        guard let view = pan.view else { return }
+        let progress = min(1, max(0, pan.translation(in: view).x / max(1, view.bounds.width)))
+        switch pan.state {
+        case .began:
+            nextID += 1
+            gesture = nextID
+            if let token { send(["type": "start", "id": nextID, "token": token]) }
+        case .changed:
+            if let gesture { send(["type": "progress", "id": gesture, "value": Double(progress)]) }
+        case .ended:
+            finish(progress >= 0.35 || pan.velocity(in: view).x >= 700 ? "commit" : "cancel")
+        case .cancelled, .failed:
+            finish("cancel")
+        default:
+            break
+        }
+    }
+
+    private func finish(_ type: String) {
+        guard let id = gesture else { return }
+        gesture = nil
+        send(["type": type, "id": id])
+    }
+}
+
+// 宿主自身持有 edgeBack，并在控制器解除绑定时调用 detach()。
+edgeBack = MuvraEdgeBack(webView: webView, nativePop: navigationController?.interactivePopGestureRecognizer) { [weak webView] message in
+    webView?.callAsyncJavaScript(
+        "window.muvraBack(message)", arguments: ["message": message], in: nil, in: .page,
+        completionHandler: nil
+    )
+}
+```
+
+示例使用 `WKWebView.callAsyncJavaScript` 传递消息对象。应用如果还使用 WebKit 网页历史或额外的 UIKit 返回手势，应协调同一区域的识别优先级。 [WebKit JavaScript 调用](<https://developer.apple.com/documentation/webkit/wkwebview/callasyncjavascript(_:arguments:in:in:completionhandler:)>) · [WebKit 历史手势](https://developer.apple.com/documentation/webkit/wkwebview/allowsbackforwardnavigationgestures)
+
 ## 缓存及选项
 
 | 选项                  | 默认                       | 契约                                                     |
